@@ -2,56 +2,62 @@
 #define __minispark_h__
 
 #include <pthread.h>
+#include <semaphore.h>
 
 #define MAXDEPS (2)
-#define TIME_DIFF_MICROS(start, end) \
-  (((end.tv_sec - start.tv_sec) * 1000000L) + ((end.tv_nsec - start.tv_nsec) / 1000L))
+#define TIME_DIFF_MICROS(start, end)          \
+  (((end.tv_sec - start.tv_sec) * 1000000L) + \
+   ((end.tv_nsec - start.tv_nsec) / 1000L))
 
 struct RDD;
 struct List;
 
-typedef struct RDD RDD; // forward decl. of struct RDD
-typedef struct List List; // forward decl. of List.
+typedef struct RDD RDD;    // forward decl. of struct RDD
+typedef struct List List;  // forward decl. of List.
 // Minimally, we assume "list_add_elem(List *l, void*)"
 
 // Different function pointer types used by minispark
 typedef void* (*Mapper)(void* arg);
 typedef int (*Filter)(void* arg, void* pred);
 typedef void* (*Joiner)(void* arg1, void* arg2, void* arg);
-typedef unsigned long (*Partitioner)(void *arg, int numpartitions, void* ctx);
+typedef unsigned long (*Partitioner)(void* arg, int numpartitions, void* ctx);
 typedef void (*Printer)(void* arg);
 
-typedef enum {
-  MAP,
-  FILTER,
-  JOIN,
-  PARTITIONBY,
-  FILE_BACKED
-} Transform;
+typedef enum { MAP, FILTER, JOIN, PARTITIONBY, FILE_BACKED } Transform;
 
-struct RDD {    
-  Transform trans; // transform type, see enum
-  void* fn; // transformation function
-  void* ctx; // used by minispark lib functions
-  List* partitions; // list of partitions
-  
+struct RDD {
+  Transform trans;   // transform type, see enum
+  void* fn;          // transformation function
+  void* ctx;         // used by minispark lib functions
+  List* partitions;  // list of partitions
+
   RDD* dependencies[MAXDEPS];
-  int numdependencies; // 0, 1, or 2
+  int numdependencies;  // 0, 1, or 2
+  int numpartitions;    // number of partitions in this RDD
 
   // you may want extra data members here
+  int* materializedPartitions;  // 0 if not materialized, 1 if materialized for
+                                // each partition
 };
 struct List {
-  void** items;          // array of void* to hold elements
-  int size;              // current number of elements
-  int capacity;          // total allocated space
-  int cursor;            // for iteration
-  pthread_mutex_t lock;  // optional: for thread-safe appending
+  void** items;
+  int size;
+  int capacity;
+  int index;
+  pthread_mutex_t lock;
 };
+
+List* list_init(int capacity);
+void list_append(List* list, void* elem);
+void* list_get(List* list, int index);
+void list_free(List* list);
+void* list_next(List* list);
+void list_seek_to_start(List* list);
 
 typedef struct {
   struct timespec created;
   struct timespec scheduled;
-  size_t duration; // in usec
+  size_t duration;  // in usec
   RDD* rdd;
   int pnum;
 } TaskMetric;
@@ -62,6 +68,33 @@ typedef struct {
   TaskMetric* metric;
 } Task;
 
+typedef struct {
+  Task* buffer;  // circular buffer of tasks
+  int capacity;  // max number of tasks
+  int head;      // dequeue index
+  int tail;      // enqueue indexx
+  int size;      // number of tasks in the queue
+} WorkQueue;
+
+typedef struct {
+  pthread_t* threads;  // array of worker threads
+  int numthreads;      // number of worker threads
+  WorkQueue queue;     // work queue for tasks
+  int active_tasks;
+  int shutdown;               // flag to indicate shutdown
+  pthread_mutex_t lock;       // mutex for thread pool
+  sem_t queue_empty;          // available empty slots
+  pthread_cond_t queue_full;  // available tasks
+} ThreadPool;
+
+#define QUEUE_CAPACITY 10
+
+extern ThreadPool pool;
+
+void thread_pool_init(int num_threads);
+void thread_pool_destroy();
+void* work_loop(void*);
+void submit_task(Task task);
 //////// actions ////////
 
 // Return the total number of elements in "dataset"
