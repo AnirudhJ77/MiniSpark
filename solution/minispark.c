@@ -111,13 +111,19 @@ RDD *create_rdd(int numdeps, Transform t, void *fn, ...)
   {
     RDD *dep = va_arg(args, RDD *);
     rdd->dependencies[i] = dep;
+    pthread_mutex_lock(&dep->lock);
+    dep->parent = rdd;
+    pthread_mutex_unlock(&dep->lock);
   }
   va_end(args);
 
   rdd->numdependencies = numdeps;
+  rdd->dependencies_met = 0;
+  pthread_mutex_init(&rdd->lock, NULL);
   rdd->trans = t;
   rdd->fn = fn;
   rdd->partitions = NULL;
+  rdd->parent = NULL;
   if (t != PARTITIONBY) {
     rdd->numpartitions = rdd->dependencies[0]->numpartitions;
     rdd->partitions = list_init(rdd->numpartitions);
@@ -169,6 +175,8 @@ RDD *RDDFromFiles(char **filenames, int numfiles)
   RDD *rdd = malloc(sizeof(RDD));
   rdd->partitions = list_init(numfiles);
   rdd->materializedPartitions = malloc(numfiles * sizeof(int));
+  pthread_mutex_init(&rdd->lock, NULL);
+  rdd->dependencies_met = 0;
   for (int i = 0; i < numfiles; i++)
   {
     FILE *fp = fopen(filenames[i], "r");
@@ -183,34 +191,22 @@ RDD *RDDFromFiles(char **filenames, int numfiles)
   rdd->numdependencies = 0;
   rdd->trans = FILE_BACKED;
   rdd->fn = (void *)identity;
+  rdd->numpartitions = numfiles;
+  rdd->parent = NULL;
+  rdd->ctx = NULL;
   return rdd;
 }
 
-void execute(RDD* rdd) {
-  
-  return;
-}
-
-WorkQueue init_queue(int size) {
-  if (size <= 0) {
-    printf("error creating queue with size %d\n", size);
-    exit(1);
-  }
+WorkQueue init_queue() {
   WorkQueue queue;
-  queue.capacity = size;
-  queue.head = 0;
-  queue.tail = 0;
+  queue.head = NULL;
+  queue.tail = NULL;
   queue.size = 0;
-  queue.buffer = malloc(sizeof(Task) * size);
-  if (queue.buffer == NULL) {
-    printf("error mallocing new queue buffer\n");
-    exit(1);
-  }
   return queue;
 }
 void free_queue(WorkQueue *queue) {
-  assert(queue->head == queue->tail);
-  free(queue->buffer);
+  assert(queue->head == NULL);
+  assert(queue->tail == NULL);
 }
 
 void thread_pool_init(int num_threads) {
@@ -218,10 +214,9 @@ void thread_pool_init(int num_threads) {
   pool.threads = malloc(sizeof(pthread_t) * num_threads);
   // pool->shutting_down = false;
   pool.active_tasks = 0;
-  pool.queue = init_queue(QUEUE_CAPACITY);
+  pool.queue = init_queue();
   pool.shutdown = 0;
-  sem_init(&pool.queue_empty, 0, pool.queue.capacity);
-  pthread_cond_init(&pool.queue_full, NULL);
+  pthread_cond_init(&pool.not_empty, NULL);
   pthread_mutex_init(&pool.lock, NULL);
   for (int i = 0; i < num_threads; i++) {
     pthread_create(&pool.threads[i], NULL, work_loop, NULL);
@@ -231,7 +226,7 @@ void thread_pool_init(int num_threads) {
 void thread_pool_destroy() {
   pthread_mutex_lock(&pool.lock);
   pool.shutdown = 1;
-  pthread_cond_broadcast(&pool.queue_full);
+  pthread_cond_broadcast(&pool.not_empty);
   pthread_mutex_unlock(&pool.lock);
   printf("Broadcasted shutdown signal to threads\n");
   for (int i = 0; i < pool.numthreads; i++) {
@@ -242,43 +237,47 @@ void thread_pool_destroy() {
   free(pool.threads);
   free_queue(&pool.queue);
   pthread_mutex_destroy(&pool.lock);
-  sem_destroy(&pool.queue_empty);
-  pthread_cond_destroy(&pool.queue_full);
+  pthread_cond_destroy(&pool.not_empty);
+}
+
+Task pop_task(WorkQueue *queue) {
+  if (queue->head == NULL) {
+    printf("error popping from empty queue\n");
+    exit(1);
+  }
+  TaskNode *node = queue->head;
+  Task task = node->task;
+  queue->head = node->next;
+  if (queue->head == NULL) {
+    queue->tail = NULL;
+  }
+  queue->size--;
+  free(node);
+  return task;
+}
+
+void insert_node(WorkQueue *queue, TaskNode *node) {
+  if (queue->head == NULL) {
+    queue->head = node;
+    queue->tail = node;
+  } else {
+    queue->tail->next = node;
+    queue->tail = node;
+  }
+  queue->size++;
 }
 void submit_task(Task task) {
-  sem_wait(&pool.queue_empty);
-  pthread_mutex_lock(&pool.lock);
-  pool.queue.buffer[pool.queue.tail] = task;
-  pool.queue.tail = (pool.queue.tail + 1) % pool.queue.capacity;
-  pool.queue.size++;
-  pool.active_tasks++;
-  pthread_cond_signal(&pool.queue_full);
-  pthread_mutex_unlock(&pool.lock);
-}
-void *work_loop(void *arg) {
-  (void)arg;  // unused
-  while (1) {
-    pthread_mutex_lock(&pool.lock);
-    while (pool.queue.size == 0 && !pool.shutdown) {
-      pthread_cond_wait(&pool.queue_full, &pool.lock);
-    }
-    if (pool.shutdown && pool.queue.size == 0) {
-      pthread_mutex_unlock(&pool.lock);
-      break;
-    }
-    Task task = pool.queue.buffer[pool.queue.head];
-    pool.queue.head = (pool.queue.head + 1) % pool.queue.capacity;
-    pool.queue.size--;
-    pthread_mutex_unlock(&pool.lock);
-    sem_post(&pool.queue_empty);
-    // Execute the task
-    execute(task.rdd);
-    pthread_mutex_lock(&pool.lock);
-    pool.active_tasks--;
-    pthread_mutex_unlock(&pool.lock);
+  TaskNode *node = malloc(sizeof(TaskNode));
+  if (node == NULL) {
+    printf("error mallocing new task node\n");
+    exit(1);
   }
-  pthread_exit(NULL);
-  return NULL;
+  node->task = task;
+  node->next = NULL;
+  pthread_mutex_lock(&pool.lock);
+  insert_node(&pool.queue, node);
+  pthread_cond_signal(&pool.not_empty);
+  pthread_mutex_unlock(&pool.lock);
 }
 
 void MS_Run() {
@@ -287,15 +286,89 @@ void MS_Run() {
 
   if (sched_getaffinity(0, sizeof(set), &set) == -1) {
     perror("sched_getaffinity");
-    return -1;
+    exit(1);
   }
+  int num_cpus = CPU_COUNT(&set);
+  thread_pool_init(max(num_cpus - 1, 1));
   return;
 }
 
 void MS_TearDown() {
+  thread_pool_destroy();
   return;
 }
-
+// Caller must hold rdd lock before calling this function
+void submit_rdd(RDD *rdd) {
+  for (int i = 0; i < rdd->numpartitions; i++) {
+    assert(rdd->materializedPartitions[i] == 0);
+    assert(rdd->submitted == 0);
+    assert(rdd->trans == FILE_BACKED);
+    assert(rdd->parent != NULL);  // need parent to traverse up the tree
+    Task task;
+    task.rdd = rdd;
+    task.pnum = i;
+    task.metric = NULL;  // TODO
+    rdd->submitted = 1;
+    submit_task(task);
+  }
+}
+// main thread func
+void execute(RDD *rdd) {
+  for (int i = 0; i < rdd->numdependencies; i++) {
+    RDD *dep = rdd->dependencies[i];
+    execute(dep);
+  }
+  if (rdd->numdependencies == 0) {
+    submit_rdd(rdd);
+  }
+  return;
+}
+int is_rdd_materialized(RDD *rdd) {
+  for (int i = 0; i < rdd->numpartitions; i++) {
+    if (rdd->materializedPartitions[i] == 0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+// worker thread func
+void execute_task(Task task) {
+  materialize_partition(task.rdd, task.pnum);
+  RDD *parent = task.rdd->parent;
+  if (parent != NULL) {
+    if (is_rdd_materialized(task.rdd)) {
+      pthread_mutex_lock(&parent->lock);
+      parent->dependencies_met++;
+      if (parent->dependencies_met == parent->numdependencies) {
+        submit_rdd(parent);
+      }
+      pthread_mutex_unlock(&parent->lock);
+    }
+  }
+}
+void *work_loop(void *arg) {
+  (void)arg;  // unused
+  while (1) {
+    pthread_mutex_lock(&pool.lock);
+    while (pool.queue.size == 0 && !pool.shutdown) {
+      pthread_cond_wait(&pool.not_empty, &pool.lock);
+    }
+    if (pool.shutdown && pool.queue.size == 0) {
+      pthread_mutex_unlock(&pool.lock);
+      break;
+    }
+    Task task = pop_task(&pool.queue);
+    pool.active_tasks++;
+    pthread_mutex_unlock(&pool.lock);
+    // Execute the task
+    execute_task(task);
+    pthread_mutex_lock(&pool.lock);
+    pool.active_tasks--;
+    pthread_mutex_unlock(&pool.lock);
+  }
+  pthread_exit(NULL);
+  return NULL;
+}
 int count(RDD *rdd) {
   execute(rdd);
 

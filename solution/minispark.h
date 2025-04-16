@@ -36,8 +36,13 @@ struct RDD {
   int numpartitions;    // number of partitions in this RDD
 
   // you may want extra data members here
-  int* materializedPartitions;  // 0 if not materialized, 1 if materialized for
-                                // each partition
+  RDD* parent;  // parent RDD, if any
+
+  // changeable state
+  pthread_mutex_t lock;         // lock for the state variables
+  int* materializedPartitions;  // 0 if not materialized, 1 if materialized
+  int dependencies_met;
+  int submitted;  // 0 if not submitted, 1 if submitted
 };
 struct List {
   void** items;
@@ -68,11 +73,15 @@ typedef struct {
   TaskMetric* metric;
 } Task;
 
+struct taskNode {
+  Task task;
+  struct taskNode* next;
+};
+typedef struct taskNode TaskNode;
+
 typedef struct {
-  Task* buffer;  // circular buffer of tasks
-  int capacity;  // max number of tasks
-  int head;      // dequeue index
-  int tail;      // enqueue indexx
+  TaskNode* head;  // dequeue index
+  TaskNode* tail;  // enqueue index
   int size;      // number of tasks in the queue
 } WorkQueue;
 
@@ -83,11 +92,8 @@ typedef struct {
   int active_tasks;
   int shutdown;               // flag to indicate shutdown
   pthread_mutex_t lock;       // mutex for thread pool
-  sem_t queue_empty;          // available empty slots
-  pthread_cond_t queue_full;  // available tasks
+  pthread_cond_t not_empty;   // available tasks
 } ThreadPool;
-
-#define QUEUE_CAPACITY 10
 
 extern ThreadPool pool;
 

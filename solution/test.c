@@ -57,22 +57,23 @@ void rdd_files_test() {
 
 }
 void test_thread_pool() {
-    thread_pool_init(2);
-    printf("Submitting tasks...\n");
+  MS_Run();
+  printf("Submitting tasks...\n");
 
-    for (int i = 0; i < 10; i++) {
-        Task t;
-        t.rdd = (RDD*)(0x1 + i);  // dummy non-null pointers (for logging only)
-        t.pnum = i;
-        t.metric = NULL;
-        submit_task(t);
-    }
+  for (int i = 0; i < 10; i++) {
+    Task t;
+    t.rdd = (RDD*)(0x1 + i);  // dummy non-null pointers (for logging only)
+    t.pnum = i;
+    t.metric = NULL;
+    submit_task(t);
+  }
 
     printf("Submitted 10 tasks. Tearing down...\n");
-    thread_pool_destroy();
+    MS_TearDown();
 
     printf("All tasks completed. Shutdown clean.\n");
 }
 int main(int argc, char** argv) {
-    test_thread_pool();
+  rdd_files_test();
+  test_thread_pool();
 }
