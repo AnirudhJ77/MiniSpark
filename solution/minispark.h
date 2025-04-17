@@ -3,12 +3,14 @@
 
 #include <pthread.h>
 #include <semaphore.h>
+#include <stdio.h>
 
 #define MAXDEPS (2)
 #define TIME_DIFF_MICROS(start, end)          \
   (((end.tv_sec - start.tv_sec) * 1000000L) + \
    ((end.tv_nsec - start.tv_nsec) / 1000L))
 
+#define QUEUE_CAPACITY 100
 struct RDD;
 struct List;
 
@@ -43,6 +45,7 @@ struct RDD {
   int* materializedPartitions;  // 0 if not materialized, 1 if materialized
   int dependencies_met;
   int submitted;  // 0 if not submitted, 1 if submitted
+  pthread_cond_t* done;  // only used for root rdd
 };
 struct List {
   void** items;
@@ -58,6 +61,8 @@ void* list_get(List* list, int index);
 void list_free(List* list);
 void* list_next(List* list);
 void list_seek_to_start(List* list);
+void free_dag(RDD* rdd);
+void free_rdd(RDD* rdd);
 
 typedef struct {
   struct timespec created;
@@ -86,8 +91,19 @@ typedef struct {
 } WorkQueue;
 
 typedef struct {
+  TaskMetric queue[QUEUE_CAPACITY];
+  int head;                  // dequeue index
+  int tail;                  // enqueue index
+  int size;                  // number of tasks in the queue
+  pthread_mutex_t lock;      // mutex for the queue
+  pthread_cond_t not_empty;  // condition variable for not empty
+  FILE* logfile;             // log file for metrics
+} MetricQueue;
+
+typedef struct {
   pthread_t* threads;  // array of worker threads
   int numthreads;      // number of worker threads
+  pthread_t monitor;   // monitoring thread
   WorkQueue queue;     // work queue for tasks
   int active_tasks;
   int shutdown;               // flag to indicate shutdown
@@ -100,6 +116,7 @@ extern ThreadPool pool;
 void thread_pool_init(int num_threads);
 void thread_pool_destroy();
 void* work_loop(void*);
+void* monitor_loop(void*);
 void submit_task(Task task);
 //////// actions ////////
 
