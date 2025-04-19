@@ -383,7 +383,7 @@ void submit_rdd(RDD *rdd) {
   if (rdd->trans == PARTITIONBY) {
     Task task;
     task.rdd = rdd;
-    task.pnum = -1;
+    task.pnum = 0;
     submit_task(task);
   } else {
     for (int i = 0; i < rdd->numpartitions; i++) {
@@ -504,7 +504,6 @@ void apply_join(RDD *rdd, int pnum) {
 
 void apply_partition(RDD *rdd, int pnum) {
   assert(rdd->numdependencies == 1);
-  assert(pnum == -1);
   RDD *dep = rdd->dependencies[0];
   assert(is_rdd_materialized(dep));
   unsigned long (*fn)(void *, int, void *) = rdd->fn;
